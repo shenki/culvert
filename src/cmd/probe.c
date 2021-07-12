@@ -51,14 +51,14 @@ static bool cmd_probe_validate_interface(const char *iface)
     return false;
 }
 
-static const enum log_colour cmd_probe_pr_ip_colours[] = {
-    [ip_state_unknown] = colour_yellow,
-    [ip_state_absent] = colour_white,
-    [ip_state_enabled] = colour_red,
-    [ip_state_disabled] = colour_green,
+static const enum log_colour cmd_probe_pr_bridge_colours[] = {
+    [bridge_state_unknown] = colour_yellow,
+    [bridge_state_absent] = colour_white,
+    [bridge_state_enabled] = colour_red,
+    [bridge_state_disabled] = colour_green,
 };
 
-static void cmd_probe_pr_ip(enum ast_ip_state state, const char *fmt, ...)
+static void cmd_probe_pr_ip(enum ahb_bridge_state state, const char *fmt, ...)
 {
     int fd = fileno(stdout);
     va_list args;
@@ -72,7 +72,7 @@ static void cmd_probe_pr_ip(enum ast_ip_state state, const char *fmt, ...)
         return;
     }
 
-    log_highlight(fd, cmd_probe_pr_ip_colours[state], ast_ip_state_desc[state]);
+    log_highlight(fd, cmd_probe_pr_bridge_colours[state], ahb_bridge_state_desc[state]);
 
     rc = write(fd, "\n", 1);
     if (rc < 0) {
@@ -240,9 +240,9 @@ int cmd_probe(const char *name, int argc, char *argv[])
     if (!opt_interface || !strcmp("ilpc", opt_interface)) {
         cmd_probe_pr_ip(ifaces.lpc.superio, "SuperIO: ");
         if (opt_require && !strcmp("confidentiality", opt_require))
-            pass_requirement &= !(ifaces.lpc.superio == ip_state_enabled);
+            pass_requirement &= !(ifaces.lpc.superio == bridge_state_enabled);
 
-        if (ifaces.lpc.superio == ip_state_enabled) {
+        if (ifaces.lpc.superio == bridge_state_enabled) {
             cmd_probe_pr(ifaces.lpc.ilpc.rw, "Read-write", "Read-only",
                          "iLPC2AHB Bridge: ");
             if (opt_require && !strcmp("integrity", opt_require))
@@ -253,13 +253,13 @@ int cmd_probe(const char *name, int argc, char *argv[])
             || !strcmp("p2a", opt_interface)
             || !strcmp("xdma", opt_interface)) {
         cmd_probe_pr_ip(ifaces.pci.vga, "VGA PCIe device: ");
-        if (ifaces.pci.vga == ip_state_enabled) {
+        if (ifaces.pci.vga == bridge_state_enabled) {
             if (!opt_interface || !strcmp("p2a", opt_interface)) {
                 cmd_probe_pr_ip(ifaces.pci.vga_mmio, "MMIO on VGA device: ");
                 if (opt_require && !strcmp("confidentiality", opt_require))
                     pass_requirement &=
-                        !(ifaces.pci.vga_mmio == ip_state_enabled);
-                if (ifaces.pci.vga_mmio == ip_state_enabled) {
+                        !(ifaces.pci.vga_mmio == bridge_state_enabled);
+                if (ifaces.pci.vga_mmio == bridge_state_enabled) {
                     struct ahb_range *ranges[p2ab_ranges_max];
 
                     cmd_probe_sort_ranges(&ifaces.pci.ranges[0], ranges,
@@ -285,16 +285,16 @@ int cmd_probe(const char *name, int argc, char *argv[])
                 cmd_probe_pr_ip(ifaces.pci.vga_xdma, "X-DMA on VGA device: ");
         }
         cmd_probe_pr_ip(ifaces.pci.bmc, "BMC PCIe device: ");
-        if (ifaces.pci.bmc == ip_state_enabled) {
+        if (ifaces.pci.bmc == bridge_state_enabled) {
             if (!opt_interface || !strcmp("p2a", opt_interface))
                 cmd_probe_pr_ip(ifaces.pci.bmc_mmio, "MMIO on BMC device: ");
             if (!opt_interface || !strcmp("xdma", opt_interface))
                 cmd_probe_pr_ip(ifaces.pci.bmc_xdma, "X-DMA on BMC device: ");
         }
-        if ((ifaces.pci.vga == ip_state_enabled &&
-                    ifaces.pci.vga_xdma == ip_state_enabled) ||
-                (ifaces.pci.bmc == ip_state_enabled
-                    && ifaces.pci.bmc_xdma == ip_state_enabled)) {
+        if ((ifaces.pci.vga == bridge_state_enabled &&
+                    ifaces.pci.vga_xdma == bridge_state_enabled) ||
+                (ifaces.pci.bmc == bridge_state_enabled
+                    && ifaces.pci.bmc_xdma == bridge_state_enabled)) {
             if (!opt_interface || !strcmp("xdma", opt_interface))
                 cmd_probe_pr(ifaces.xdma.unconstrained, "Yes", "No",
                              "X-DMA is unconstrained: ");
@@ -305,8 +305,8 @@ int cmd_probe(const char *name, int argc, char *argv[])
     if (!opt_interface || !strcmp("debug", opt_interface)) {
         cmd_probe_pr_ip(ifaces.uart.debug, "Debug UART: ");
         if (opt_require)
-            pass_requirement &= !(ifaces.uart.debug == ip_state_enabled);
-        if (ifaces.uart.debug == ip_state_enabled) {
+            pass_requirement &= !(ifaces.uart.debug == bridge_state_enabled);
+        if (ifaces.uart.debug == bridge_state_enabled) {
             printf("Debug UART enabled on: %s\n",
                    (ifaces.uart.uart == debug_uart1) ? "UART1" : "UART5");
         }

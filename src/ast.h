@@ -8,17 +8,23 @@
 
 #include "ahb.h"
 
-enum ast_ip_state {
-    ip_state_unknown,
-    ip_state_absent,
-    ip_state_enabled,
-    ip_state_disabled,
+enum ahb_bridge_state {
+    bridge_state_unknown,
+    bridge_state_absent,
+    bridge_state_enabled,
+    bridge_state_disabled,
 };
 
-extern const char *ast_ip_state_desc[4];
+enum ahb_bridge_mode {
+    bridge_mode_none,
+    bridge_mode_read,
+    bridge_mode_readwrite,
+};
+
+extern const char *ahb_bridge_state_desc[4];
 
 struct ast_cap_lpc {
-    enum ast_ip_state superio;
+    enum ahb_bridge_state superio;
     struct ahb_range ilpc;
 };
 
@@ -34,19 +40,19 @@ enum ast_p2ab_ranges {
 };
 
 struct ast_cap_pci {
-    enum ast_ip_state vga;
-    enum ast_ip_state vga_mmio;
-    enum ast_ip_state vga_xdma;
-    enum ast_ip_state bmc;
-    enum ast_ip_state bmc_mmio;
-    enum ast_ip_state bmc_xdma;
+    enum ahb_bridge_state vga;
+    enum ahb_bridge_state vga_mmio;
+    enum ahb_bridge_state vga_xdma;
+    enum ahb_bridge_state bmc;
+    enum ahb_bridge_state bmc_mmio;
+    enum ahb_bridge_state bmc_xdma;
     struct ahb_range ranges[p2ab_ranges_max];
 };
 
 enum debug_uart { debug_uart1, debug_uart5 };
 
 struct ast_cap_uart {
-    enum ast_ip_state debug;
+    enum ahb_bridge_state debug;
     enum debug_uart uart;
 };
 

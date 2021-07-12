@@ -9,9 +9,12 @@
 #include "mb.h"
 #include "p2a.h"
 #include "priv.h"
+#include "scu.h"
 #include "sdmc.h"
 #include "soc.h"
 #include "rev.h"
+
+#include "ccan/container_of/container_of.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -50,19 +53,11 @@
 #define LPC_HICRB			0x100
 #define   LPC_HICRB_ILPC_RO		(1 << 6)
 
-struct ast_ahb_bridge_ops {
-    int (*ilpc_status)(struct soc *soc, struct ast_cap_lpc *cap);
-    int (*pci_status)(struct soc *soc, struct ast_cap_pci *cap);
-    int (*debug_status)(struct soc *soc, struct ast_cap_uart *cap);
-    int (*kernel_status)(struct soc *soc, struct ast_cap_kernel *cap);
-    int (*xdma_status)(struct soc *soc, struct ast_cap_xdma *cap);
-};
-
-const char *ast_ip_state_desc[4] = {
-    [ip_state_unknown] = "Unknown",
-    [ip_state_absent] = "Absent",
-    [ip_state_enabled] = "Enabled",
-    [ip_state_disabled] = "Disabled",
+const char *ahb_bridge_state_desc[4] = {
+    [bridge_state_unknown] = "Unknown",
+    [bridge_state_absent] = "Absent",
+    [bridge_state_enabled] = "Enabled",
+    [bridge_state_disabled] = "Disabled",
 };
 
 static int region_readl(struct soc *soc, const struct soc_region *region,
@@ -77,11 +72,63 @@ static int region_writel(struct soc *soc, const struct soc_region *region,
     return soc_writel(soc, region->start + offset, val);
 }
 
-static int ast_ilpc_status(struct soc *soc, struct ast_cap_lpc *cap)
+struct field {
+    uint32_t reg;
+    uint32_t mask;
+};
+
+struct ahb_bridge;
+
+struct ahb_bridge_ops {
+    int (*status)(struct ahb_bridge *bridge, enum ahb_bridge_state *state);
+    int (*enable)(struct ahb_bridge *bridge);
+    int (*disable)(struct ahb_bridge *bridge);
+    int (*access)(struct ahb_bridge *bridge,
+                  const struct soc_region *region, enum ahb_bridge_mode *mode);
+    int (*permit)(struct ahb_bridge *bridge,
+                  const struct soc_region *region, enum ahb_bridge_mode mode);
+    /* Compatibility for now, migrate printing code here later */
+    int (*describe)(struct ahb_bridge *bridge, void *cap);
+};
+
+struct ahb_bridge {
+    struct soc *soc;
+    const struct ahb_bridge_ops *ops;
+};
+
+struct ilpc_scu_pdata {
+    struct field sio_dec;
+};
+
+struct ilpc_ahb_bridge {
+    struct ahb_bridge bridge;
+    struct soc_region lpc;
+    struct scu scu;
+    const struct ilpc_scu_pdata *scu_pdata;
+};
+
+static inline struct ilpc_ahb_bridge *to_ilpc(struct ahb_bridge *bridge)
 {
+    return container_of(bridge, struct ilpc_ahb_bridge, bridge);
+}
+
+static int ilpc_ahb_bridge_init(struct ilpc_ahb_bridge *ctx, struct soc *soc)
+{
+    static const struct ilpc_scu_pdata ast2400_ilpc_scu_pdata = {
+        .sio_dec = {
+            .reg = SCU_G4_STRAP1,
+            .mask = SCU_G4_STRAP1_SIO_DEC
+        },
+    };
+    static const struct ilpc_scu_pdata ast2500_ilpc_scu_pdata = {
+        .sio_dec = {
+            .reg = SCU_G5_STRAP,
+            .mask = SCU_G5_STRAP_SIO_DEC
+        },
+    };
     static const struct soc_device_id scu_match[] = {
-        { .compatible = "aspeed,ast2400-scu" },
-        { .compatible = "aspeed,ast2500-scu" },
+        { .compatible = "aspeed,ast2400-scu", .data = &ast2400_ilpc_scu_pdata },
+        { .compatible = "aspeed,ast2500-scu", .data = &ast2500_ilpc_scu_pdata },
         { },
     };
     static const struct soc_device_id lpc_match[] = {
@@ -90,39 +137,186 @@ static int ast_ilpc_status(struct soc *soc, struct ast_cap_lpc *cap)
         { },
     };
     struct soc_device_node dn;
-    struct soc_region scu, lpc;
-    uint32_t val;
     int rc;
-
-    /* Lookup the SCU mapping */
-    if ((rc = soc_device_match_node(soc, scu_match, &dn)) < 0)
-        return rc;
-
-    if ((rc = soc_device_get_memory(soc, &dn, &scu)) < 0)
-        return rc;
 
     /* Lookup the LPC mapping */
     if ((rc = soc_device_match_node(soc, lpc_match, &dn)) < 0)
         return rc;
 
-    if ((rc = soc_device_get_memory(soc, &dn, &lpc)) < 0)
+    if ((rc = soc_device_get_memory(soc, &dn, &ctx->lpc)) < 0)
         return rc;
 
-    /* Read the bridge state */
-    if ((rc = region_readl(soc, &scu, SCU_HW_STRAP, &val)) < 0)
+    if ((rc = scu_init(&ctx->scu, soc, scu_match)) < 0)
         return rc;
 
-    cap->superio = !(val & SCU_HW_STRAP_SIO_DEC) ?
-                        ip_state_enabled : ip_state_disabled;
-    cap->ilpc.start = 0;
-    cap->ilpc.len = (1ULL << 32);
+    ctx->scu_pdata = scu_match_data(&ctx->scu);
 
-    if ((rc = region_readl(soc, &lpc, LPC_HICRB, &val)) < 0)
-        return rc;
-
-    cap->ilpc.rw = !(val & LPC_HICRB_ILPC_RO);
+    ctx->bridge.soc = soc;
 
     return 0;
+}
+
+static void ilpc_ahb_bridge_destroy(struct ilpc_ahb_bridge *ctx)
+{
+    ctx->bridge.soc = NULL;
+}
+
+static int
+ilpc_ahb_bridge_status(struct ahb_bridge *bridge, enum ahb_bridge_state *state)
+{
+    struct ilpc_ahb_bridge *ctx = to_ilpc(bridge);
+    uint32_t val;
+    int rc;
+
+    if ((rc = scu_readl(&ctx->scu, ctx->scu_pdata->sio_dec.reg, &val)) < 0)
+        return rc;
+
+    *state = (val & ctx->scu_pdata->sio_dec.mask) ?
+                    bridge_state_disabled : bridge_state_enabled;
+
+    return 0;
+}
+
+static int ilpc_ahb_bridge_enable(struct ahb_bridge *bridge)
+{
+    struct ilpc_ahb_bridge *ctx = to_ilpc(bridge);
+    const struct field *f;
+    int rc;
+
+    f = &ctx->scu_pdata->sio_dec;
+
+    /* Clear the disable bit */
+    if ((rc = scu_update_strapping(&ctx->scu, f->reg, f->mask, 0)) < 0)
+        return rc;
+
+    return 0;
+}
+
+static int ilpc_ahb_bridge_disable(struct ahb_bridge *bridge)
+{
+    struct ilpc_ahb_bridge *ctx = to_ilpc(bridge);
+    const struct field *f;
+    int rc;
+
+    f = &ctx->scu_pdata->sio_dec;
+
+    /* Set the disable bit */
+    if ((rc = scu_update_strapping(&ctx->scu, f->reg, f->mask, f->mask)) < 0)
+        return rc;
+
+    return 0;
+}
+
+static int ilpc_ahb_bridge_access(struct ahb_bridge *bridge,
+                                  const struct soc_region *region,
+                                  enum ahb_bridge_mode *mode)
+{
+    struct ilpc_ahb_bridge *ctx = to_ilpc(bridge);
+    uint32_t val;
+    int rc;
+
+    if (mode == bridge_mode_none)
+        return -EINVAL;
+
+    if (!region->length)
+        return -EINVAL;
+
+    if ((rc = region_readl(ctx->bridge.soc, &ctx->lpc, LPC_HICRB, &val)) < 0)
+        return rc;
+
+    *mode = (val & LPC_HICRB_ILPC_RO) ?
+                bridge_mode_read : bridge_mode_readwrite;
+
+    return 0;
+}
+
+static int ilpc_ahb_bridge_permit(struct ahb_bridge *bridge,
+                                  const struct soc_region *region,
+                                  enum ahb_bridge_mode mode)
+{
+    struct ilpc_ahb_bridge *ctx = to_ilpc(bridge);
+    uint32_t val;
+    int rc;
+
+    if (mode == bridge_mode_none)
+        return -EINVAL;
+
+    if (!region->length)
+        return -EINVAL;
+
+    if ((rc = region_readl(ctx->bridge.soc, &ctx->lpc, LPC_HICRB, &val)) < 0)
+        return rc;
+
+    if (mode == bridge_mode_readwrite) {
+        if (!(val & LPC_HICRB_ILPC_RO))
+            return 0;
+
+        val &= ~LPC_HICRB_ILPC_RO;
+    } else {
+        if (val & LPC_HICRB_ILPC_RO)
+            return 0;
+
+        val |= LPC_HICRB_ILPC_RO;
+    }
+
+    if ((rc = region_writel(ctx->bridge.soc, &ctx->lpc, LPC_HICRB, val)) < 0)
+        return rc;
+
+    return 0;
+}
+
+int ilpc_ahb_bridge_describe(struct ahb_bridge *bridge, void *_cap)
+{
+    static const struct soc_region pa = { 0, UINT32_MAX };
+    struct ast_cap_lpc *cap = _cap;
+    enum ahb_bridge_mode mode;
+    int rc;
+
+    if ((rc = ilpc_ahb_bridge_status(bridge, &cap->superio)) < 0)
+        return rc;
+
+    if ((rc = ilpc_ahb_bridge_access(bridge, &pa, &mode)) < 0)
+        return rc;
+
+    cap->ilpc.start = pa.start;
+    cap->ilpc.len = pa.length;
+    cap->ilpc.rw = (mode == bridge_mode_readwrite);
+
+    return 0;
+}
+
+#if 0
+static const struct ahb_bridge_ops ilpc_bridge_ops = {
+    .status = ilpc_ahb_bridge_status,
+    .enable = ilpc_ahb_bridge_enable,
+    .disable = ilpc_ahb_bridge_disable,
+    .access = ilpc_ahb_bridge_access,
+    .permit = ilpc_ahb_bridge_permit,
+    .describe = ilpc_ahb_bridge_describe,
+};
+#endif
+
+struct ast_ahb_bridge_ops {
+    int (*ilpc_status)(struct soc *soc, struct ast_cap_lpc *cap);
+    int (*pci_status)(struct soc *soc, struct ast_cap_pci *cap);
+    int (*debug_status)(struct soc *soc, struct ast_cap_uart *cap);
+    int (*kernel_status)(struct soc *soc, struct ast_cap_kernel *cap);
+    int (*xdma_status)(struct soc *soc, struct ast_cap_xdma *cap);
+};
+
+static int ast_ilpc_status(struct soc *soc, struct ast_cap_lpc *cap)
+{
+    struct ilpc_ahb_bridge _ilpc, *ilpc = &_ilpc;
+    int rc;
+
+    if ((rc = ilpc_ahb_bridge_init(ilpc, soc)) < 0)
+        return rc;
+
+    rc = ilpc_ahb_bridge_describe(&ilpc->bridge, cap);
+
+    ilpc_ahb_bridge_destroy(ilpc);
+
+    return rc;
 }
 
 static int ast2400_pci_status(struct soc *soc, struct ast_cap_pci *cap)
@@ -149,17 +343,17 @@ static int ast2400_pci_status(struct soc *soc, struct ast_cap_pci *cap)
         return rc;
 
     cap->vga      = (val & SCU_PCIE_CONFIG_VGA) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->vga_mmio = (val & SCU_PCIE_CONFIG_VGA_MMIO) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->vga_xdma = (val & SCU_PCIE_CONFIG_VGA_XDMA) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->bmc      = (val & SCU_PCIE_CONFIG_BMC) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->bmc_mmio = (val & SCU_PCIE_CONFIG_BMC_MMIO) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->bmc_xdma = (val & SCU_PCIE_CONFIG_BMC_XDMA) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
 
     rc = region_readl(soc, &scu, SCU_MISC, &val);
     if (rc)
@@ -234,17 +428,17 @@ static int ast2500_pci_status(struct soc *soc, struct ast_cap_pci *cap)
         return rc;
 
     cap->vga      = (val & SCU_PCIE_CONFIG_VGA) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->vga_mmio = (val & SCU_PCIE_CONFIG_VGA_MMIO) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->vga_xdma = (val & SCU_PCIE_CONFIG_VGA_XDMA) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->bmc      = (val & SCU_PCIE_CONFIG_BMC) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->bmc_mmio = (val & SCU_PCIE_CONFIG_BMC_MMIO) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
     cap->bmc_xdma = (val & SCU_PCIE_CONFIG_BMC_XDMA) ?
-                        ip_state_enabled : ip_state_disabled;
+                        bridge_state_enabled : bridge_state_disabled;
 
     if ((rc = region_readl(soc, &scu, SCU_MISC, &val)) < 0)
         return rc;
@@ -297,7 +491,7 @@ static int ast2500_pci_status(struct soc *soc, struct ast_cap_pci *cap)
 static int
 ast2400_debug_status(struct soc *soc __unused, struct ast_cap_uart *cap)
 {
-    cap->debug = ip_state_absent;
+    cap->debug = bridge_state_absent;
 
     return 0;
 }
@@ -325,7 +519,7 @@ static int ast2500_debug_status(struct soc *soc, struct ast_cap_uart *cap)
         return rc;
 
     cap->debug = !(val & SCU_MISC_UART_DBG) ?
-                    ip_state_enabled : ip_state_disabled;
+                    bridge_state_enabled : bridge_state_disabled;
 
     if ((rc = region_readl(soc, &scu, SCU_HW_STRAP, &val)) < 0)
         return rc;
@@ -550,14 +744,14 @@ int ast_ahb_init(struct ahb *ahb, bool rw)
         return ahb_init(ahb, ahb_devmem);
     }
 
-    have_vga = state.pci.vga == ip_state_enabled;
-    have_vga_mmio = state.pci.vga_mmio == ip_state_enabled;
-    have_bmc = state.pci.bmc == ip_state_enabled;
-    have_bmc_mmio = state.pci.bmc_mmio == ip_state_enabled;
+    have_vga = state.pci.vga == bridge_state_enabled;
+    have_vga_mmio = state.pci.vga_mmio == bridge_state_enabled;
+    have_bmc = state.pci.bmc == bridge_state_enabled;
+    have_bmc_mmio = state.pci.bmc_mmio == bridge_state_enabled;
     have_p2ab = (have_vga && have_vga_mmio) || (have_bmc && have_bmc_mmio);
 
     if (!have_p2ab || (rw && !state.pci.ranges[p2ab_soc].rw)) {
-        if (state.lpc.superio != ip_state_enabled)
+        if (state.lpc.superio != bridge_state_enabled)
             return -ENOTSUP;
 
         if (!state.lpc.ilpc.rw && rw)
@@ -627,7 +821,7 @@ cleanup_ilpc_ahb:
     if ((rc = ahb_init(ahb, ahb_p2ab)) < 0)
         goto cleanup;
 
-    if (state.lpc.superio != ip_state_enabled) {
+    if (state.lpc.superio != bridge_state_enabled) {
         if ((rc = soc_probe(soc, ahb)) < 0)
             goto cleanup_p2a_ahb;
 
@@ -707,7 +901,7 @@ int ast_ahb_access(const char *name __unused, int argc, char *argv[],
     int rc;
 
     if (argc < 2) {
-        loge("Not enough arguments for ilpc command\n");
+        loge("Not enough arguments for AHB access\n");
         exit(EXIT_FAILURE);
     }
 
@@ -724,7 +918,7 @@ int ast_ahb_access(const char *name __unused, int argc, char *argv[],
 
     if (!action_read) {
         if (argc < 3) {
-            loge("Not enough arguments for ilpc write command\n");
+            loge("Not enough arguments for AHB write command\n");
             exit(EXIT_FAILURE);
         }
         data = strtoul(argv[2], NULL, 0);

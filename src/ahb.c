@@ -31,7 +31,7 @@ static void ahb_notify_bridge(struct ahb *ctx)
     logi("Initialised %s AHB interface\n", ahb_interface_names[ctx->bridge]);
 }
 
-struct ahb *ahb_use(struct ahb *ctx, enum ahb_bridge type, void *bridge)
+struct ahb *ahb_use(struct ahb *ctx, enum ahb_bridge_type type, void *bridge)
 {
     ctx->bridge = type;
     if (type == ahb_ilpcb)
@@ -50,7 +50,7 @@ struct ahb *ahb_use(struct ahb *ctx, enum ahb_bridge type, void *bridge)
     return ctx;
 }
 
-int ahb_init(struct ahb *ctx, enum ahb_bridge type, ...)
+int ahb_init(struct ahb *ctx, enum ahb_bridge_type type, ...)
 {
     int rc;
 

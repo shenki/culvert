@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-enum ahb_bridge {
+enum ahb_bridge_type {
     ahb_ilpcb,
     ahb_l2ab,
     ahb_p2ab,
@@ -34,7 +34,7 @@ struct debug;
 struct devmem;
 
 struct ahb {
-    enum ahb_bridge bridge;
+    enum ahb_bridge_type bridge;
     union {
         struct ilpcb *ilpcb;
         struct l2ab *l2ab;
@@ -44,9 +44,9 @@ struct ahb {
     };
 };
 
-struct ahb *ahb_use(struct ahb *ctx, enum ahb_bridge type, void *bridge);
+struct ahb *ahb_use(struct ahb *ctx, enum ahb_bridge_type type, void *bridge);
 
-int ahb_init(struct ahb *ctx, enum ahb_bridge type, ...);
+int ahb_init(struct ahb *ctx, enum ahb_bridge_type type, ...);
 
 /* Tear-down the AHB interface when SoC has *not* been reset */
 int ahb_destroy(struct ahb *ctx);
