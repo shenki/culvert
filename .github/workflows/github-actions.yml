@@ -2,8 +2,25 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  build:
-    name: Build
+  build-centos7:
+    name: Build for Centos 7
+    runs-on: centos:7
+    steps:
+      - name: Activate EPEL
+        run: yum install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+      - name: Install dependencies
+        run: yum install meson gcc dtc git flex bison
+      - uses: actions/checkout@v2
+      - name: Build
+        run: meson setup build-centos7 && ninja -C build-centos7
+      - name: Upload
+        uses: actions/upload-artifact@v2
+        with:
+          name: Centos amd64
+          path: build-centos7/culvert
+
+  build-ubuntu:
+    name: Build for Ubuntu
     runs-on: ubuntu-latest
     steps:
       - name: Update archive
